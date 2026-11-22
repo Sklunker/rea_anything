@@ -27,6 +27,7 @@ const posixIt = test.skipIf(process.platform === "win32");
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { OwnedCommandFailure } from "../../../src/process/OwnedCommand.js";
 import { selectArtifactCommandPath } from "../../../src/process/ArtifactCommandPath.js";
+import { windowsSystemRootEnvironment } from "../../support/process/windowsSystemRoot.js";
 
 it.skipIf(process.platform !== "darwin")(
   "preserves opaque cancellation during native ownership preparation without acquiring caller resources",
@@ -78,7 +79,7 @@ it("preserves a failed producer when cancellation arrives during its final clean
     ],
     inputPath: "/authored-capture.pcap",
     limits: { timeoutMs: 5000, maxOutputBytes: 1024 },
-    environment: {},
+    environment: windowsSystemRootEnvironment(),
     signal: controller.signal,
     launcher: async (spawn) => {
       const launched = await spawnOwnedProviderProcess(spawn);
@@ -133,7 +134,7 @@ it.each([
         'process.stdout.write("ready"); setInterval(() => {}, 1000)',
       ],
       limits: { timeoutMs: 5000, maxOutputBytes: 1024 },
-      environment: {},
+      environment: windowsSystemRootEnvironment(),
       signal: controller.signal,
       launcher: async (spawn) => {
         const launched = await spawnOwnedProviderProcess(spawn);
@@ -188,7 +189,7 @@ it.skipIf(process.platform !== "darwin")(
       command: process.execPath,
       arguments: ["--version"],
       limits: { timeoutMs, maxOutputBytes: 1024 },
-      environment: {},
+      environment: windowsSystemRootEnvironment(),
       signal: undefined,
       retain: (owner) => {
         onTestFinished(async () => {
@@ -228,7 +229,7 @@ it("returns complete stdout while retaining unresolved process cleanup", async (
     command: process.execPath,
     arguments: ["-e", 'process.stdout.write("complete producer output")'],
     limits: { timeoutMs: 5000, maxOutputBytes: 1024 },
-    environment: {},
+    environment: windowsSystemRootEnvironment(),
     signal: undefined,
     launcher: async (spawn) => {
       const launched = await spawnOwnedProviderProcess(spawn);
