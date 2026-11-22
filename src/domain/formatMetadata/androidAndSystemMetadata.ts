@@ -7,6 +7,11 @@ import {
   ntfsAttributeListResolutionSchema,
 } from "../windows/ntfsMftAttributes.js";
 import { MFT_INLINE_HEADER_LIMIT } from "../windows/ntfsMft.js";
+import {
+  AUDITD_INLINE_DIAGNOSTIC_LIMIT,
+  AUDITD_INLINE_EVENT_LIMIT,
+  AUDITD_INLINE_EVENT_TYPE_LIMIT,
+} from "../linux/auditdLog.js";
 import { offset, uint32 } from "./primitives.js";
 
 const ntfsRecordHeaderSchema = z.strictObject({
@@ -271,3 +276,56 @@ export const androidBootImageEntryMetadataSchema = z.strictObject({
 export type AndroidBootImageEntryMetadata = z.infer<
   typeof androidBootImageEntryMetadataSchema
 >;
+
+/** auditd text-log facts: record and event totals plus a sampled event window. */
+export const auditdLogMetadataSchema = z.strictObject({
+  kind: z.literal("auditd-log"),
+  line_count: offset,
+  record_count: offset,
+  event_count: offset,
+  /**
+   * False when every event stayed inside the retained window, so `event_count`
+   * is exact. Past the window an event's records are no longer joined, and an
+   * interleaved one can be counted more than once; the totals are then lower
+   * bounds and the limitations say so.
+   */
+  event_count_lower_bound: z.boolean(),
+  event_type_counts: z.array(
+    z.strictObject({ type: z.string(), count: offset }),
+  ),
+  malformed_line_count: offset,
+  malformed_lines: z
+    .array(
+      z.strictObject({
+        line: offset,
+        reason: z.string(),
+        excerpt: z.string(),
+      }),
+    )
+    .max(AUDITD_INLINE_DIAGNOSTIC_LIMIT),
+  omitted_malformed_lines: offset,
+  out_of_order_record_count: offset,
+  duplicate_record_count: offset,
+  interleaved_event_count: offset,
+  events: z
+    .array(
+      z.strictObject({
+        event_id: z.string(),
+        node: z.string().nullable(),
+        event_seconds: offset,
+        event_millis: offset,
+        serial: offset,
+        record_count: offset,
+        record_types: z
+          .array(z.strictObject({ type: z.string(), count: offset }))
+          .max(AUDITD_INLINE_EVENT_TYPE_LIMIT),
+        first_line: offset,
+        last_line: offset,
+        duplicate_record_count: offset,
+        interleaved: z.boolean(),
+      }),
+    )
+    .max(AUDITD_INLINE_EVENT_LIMIT),
+  omitted_events: offset,
+  trailing_bytes: offset,
+});
