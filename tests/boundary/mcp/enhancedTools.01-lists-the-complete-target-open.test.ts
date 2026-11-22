@@ -17,6 +17,10 @@ import { AnalysisCapabilityUnavailableError } from "../../../src/domain/analysis
 import { nativeDispatchMetadataResultSchema } from "../../../src/domain/native/objcSwiftMetadata.js";
 import { createMcpSchemaValidation } from "../../fixtures/mcpSchemaValidation.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import {
+  ghidraFunctionIdentity,
+  ghidraReferenceEdge,
+} from "../../../src/domain/ghidraValues.fixture.js";
 
 const targetObservation = (value: unknown) =>
   resultOk(
@@ -69,6 +73,21 @@ const capabilityUnavailable = (operation: string, message: string) =>
   Promise.resolve(
     err(new AnalysisCapabilityUnavailableError("fixture", operation, message)),
   );
+
+const procedureReferencesObservation = () =>
+  targetObservation({
+    procedure: ghidraFunctionIdentity(),
+    direction: "outgoing",
+    reference_kinds_available: true,
+    unresolved_calls: [],
+    references: [
+      {
+        ...ghidraReferenceEdge(),
+        source_address: "0x1",
+        target_address: "0x40023830",
+      },
+    ],
+  });
 
 const fixturePort = (): AnalysisOperationPort => ({
   // oxlint-disable-next-line complexity -- this fixture exhaustively serves the registered MCP surface.
@@ -210,6 +229,8 @@ const fixturePort = (): AnalysisOperationPort => ({
         return Promise.resolve(ok(inventory({})));
       case "analyze_function":
         return Promise.resolve(targetObservation(functionDossier));
+      case "procedure_references":
+        return Promise.resolve(procedureReferencesObservation());
       default:
         throw new Error(`Unexpected analysis operation: ${name}`);
     }
@@ -279,6 +300,14 @@ describe("enhanced MCP tools", () => {
       ["inspect_native_dispatch_metadata", { max_records: 100 }],
       ["trace_native_values", { procedure: "0x1" }],
       ["decompile_all", { output_directory: join(outputParent, "out") }],
+      [
+        "reconstruct_procedure_hardware_interactions",
+        {
+          procedure: "0x1",
+          hardware_architecture: "cortex-m",
+          platform: "stm32f4",
+        },
+      ],
     ] as const;
     const functionProgress: {
       progress: number;
@@ -470,6 +499,12 @@ describe("enhanced MCP tools", () => {
       layout_status: "address",
     });
     expect(JSON.stringify(results[14])).not.toContain("pseudo:");
+    expect(results[15]).toMatchObject({
+      procedure: "0x1",
+      architecture: "cortex-m",
+      platform: "stm32f4",
+      mmioAccessCount: 1,
+    });
   });
 });
 

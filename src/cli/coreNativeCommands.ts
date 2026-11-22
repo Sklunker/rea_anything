@@ -308,4 +308,55 @@ const registerProcedureSelectorCommands = (
     },
     run,
   );
+  registerContractCommand(
+    cli,
+    logger,
+    contractNamed(
+      ENHANCED_TOOL_CONTRACTS,
+      "reconstruct_procedure_hardware_interactions",
+    ),
+    {
+      description: `Reconstruct MMIO and peripheral register interactions for one native firmware procedure. ${addressOrProcedureGuidance}`,
+      sessionTarget: nativeTarget("Local firmware or executable path", true),
+      positionals: ["procedure"],
+      jsonInputs: {
+        devicetree:
+          "Expected inline JSON or a readable JSON file path for --devicetree",
+      },
+      fields: {
+        procedure: {
+          description: `Procedure name or canonical address. ${addressOrProcedureGuidance}`,
+        },
+        hardware_architecture: {
+          name: "hardware-architecture",
+          description:
+            "Target CPU architecture (arm, cortex-m, xtensa, riscv, arm64, x86, mips)",
+        },
+        platform: {
+          description: "Optional explicit SoC catalog family",
+        },
+        board: {
+          description: "Optional known development board profile",
+        },
+        svd_xml: {
+          name: "svd-xml",
+          description: "Optional inline CMSIS-SVD XML description",
+        },
+        devicetree: {
+          description:
+            "Optional parsed Flattened Devicetree JSON or JSON file path",
+        },
+        esp_chip_id: {
+          name: "esp-chip-id",
+          description:
+            "Optional ESP image header chip_id from inspect_firmware_image",
+        },
+        uf2_family_id: {
+          name: "uf2-family-id",
+          description: "Optional UF2 family_id from inspect_firmware_image",
+        },
+      },
+    },
+    run,
+  );
 };
