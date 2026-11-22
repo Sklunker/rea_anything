@@ -1,5 +1,8 @@
 import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
-import type { Evidence } from "../../domain/evidence.js";
+import type {
+  Evidence,
+  ProviderSelectionProvenance,
+} from "../../domain/evidence.js";
 import type { EvidenceBundle } from "../../domain/evidenceBundle.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import type { UnknownRegistryError } from "../../domain/unknownRegistryError.js";
@@ -9,7 +12,7 @@ import type {
   UnknownStatus,
   UpdateUnknownInput,
 } from "../../domain/residualUnknown.js";
-import type { Result } from "../../domain/result.js";
+import { ok, type Result } from "../../domain/result.js";
 import { EvidenceLedger, type EvidenceImportDelta } from "./EvidenceLedger.js";
 import { unknownMutationEvidence } from "./UnknownEvidence.js";
 import type {
@@ -23,6 +26,7 @@ import type {
 } from "./InvestigationRecordPort.js";
 import {
   admitInvestigationAuthentication,
+  admitUnknownMutationAuthentication,
   type InvestigationRetentionPolicy,
 } from "./InvestigationRetention.js";
 
@@ -65,11 +69,44 @@ export class InvestigationRecords
     );
   }
 
+  /**
+   * Hold caller input to the same ordinary-JSON and heap-headroom rules the
+   * ledger applies, before the caller seals it for attribution.
+   *
+   * A sealed value skips those checks inside the ledger, so a workflow that
+   * re-attributes a record must admit the raw input it received here first.
+   * A record the ledger already holds is that sealed value: it was admitted
+   * when it was recorded, so re-reading it here would only repeat the work.
+   */
+  admitSealedEvidenceInput(
+    input: unknown,
+    operation: string,
+  ): Result<void, AnalysisError> {
+    if (this.#evidence.holdsSealedEvidence(input)) return ok(undefined);
+    return admitInvestigationAuthentication(
+      input,
+      operation,
+      this.retentionPolicy,
+    );
+  }
+
   /** Record immutable Evidence idempotently; reject conflicting content. */
   recordEvidence(
     evidence: Evidence,
   ): Result<"added" | "duplicate", AnalysisError> {
     return this.#evidence.record(evidence);
+  }
+
+  /**
+   * Adopt a later recording session's display provenance for an Evidence value
+   * this ledger already holds under the same semantic ID, without adding a
+   * record. Returns the stored replacement, or null when nothing changed.
+   */
+  replaceEvidenceMetadata(
+    current: Evidence,
+    previous: Evidence,
+  ): Result<Evidence | null, AnalysisError> {
+    return this.#evidence.replaceMetadata(current, previous);
   }
 
   /** Check one semantic Evidence ID without exposing stored values. */
@@ -113,55 +150,62 @@ export class InvestigationRecords
   recordUnknown(
     input: RecordUnknownInput,
     target?: BinaryTarget,
+    providerSelection?: ProviderSelectionProvenance,
   ): Result<ResidualUnknown, AnalysisError> {
-    const admitted = admitInvestigationAuthentication(
+    const mutation = unknownMutationEvidence(
+      target,
+      { operation: "record_unknown", input },
+      providerSelection,
+    );
+    const admitted = admitUnknownMutationAuthentication(
       input,
+      mutation,
       "record_unknown",
       this.retentionPolicy,
     );
     if (!admitted.ok) return admitted;
-    return this.#evidence.recordUnknown(
-      input,
-      unknownMutationEvidence(target, { operation: "record_unknown", input }),
-    );
+    return this.#evidence.recordUnknown(input, mutation);
   }
 
   /** Commit derived Evidence and its Unknown atomically without an implicit subject. */
   recordEvidenceWithUnknown(
     evidence: Evidence,
     input: RecordUnknownInput,
+    providerSelection?: ProviderSelectionProvenance,
   ): Result<ResidualUnknown | null, AnalysisError> {
-    const admitted = admitInvestigationAuthentication(
+    const mutation = unknownMutationEvidence(
+      undefined,
+      { operation: "record_unknown", input },
+      providerSelection,
+    );
+    const admitted = admitUnknownMutationAuthentication(
       input,
+      mutation,
       "record_unknown",
       this.retentionPolicy,
     );
     if (!admitted.ok) return admitted;
-    return this.#evidence.recordWithUnknown(
-      evidence,
-      input,
-      unknownMutationEvidence(undefined, {
-        operation: "record_unknown",
-        input,
-      }),
-    );
+    return this.#evidence.recordWithUnknown(evidence, input, mutation);
   }
 
   /** Update an optimistic revision with an explicitly supplied Evidence subject. */
   updateUnknown(
     input: UpdateUnknownInput,
     target?: BinaryTarget,
+    providerSelection?: ProviderSelectionProvenance,
   ): Result<ResidualUnknown, AnalysisError> {
-    const admitted = admitInvestigationAuthentication(
+    const evidence = unknownMutationEvidence(
+      target,
+      { operation: "update_unknown", input },
+      providerSelection,
+    );
+    const admitted = admitUnknownMutationAuthentication(
       input,
+      evidence,
       "update_unknown",
       this.retentionPolicy,
     );
     if (!admitted.ok) return admitted;
-    const evidence = unknownMutationEvidence(target, {
-      operation: "update_unknown",
-      input,
-    });
     return this.#evidence.updateUnknown(input, evidence);
   }
 
