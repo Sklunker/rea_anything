@@ -9,6 +9,7 @@ import {
   clientConfigurationForWrite,
   clientWriteDialect,
   effectiveClientConfiguration,
+  readConfigurationFile,
   readConfigurationText,
   type ClientConfigurationSource,
   type ClientConfigurationFileError,
@@ -25,6 +26,7 @@ import {
   OMP_DISABLED_SERVERS_KEY,
   parseClientConfiguration,
   parseZcodeFallbackConfiguration,
+  parseGgcodeLegacyConfiguration,
   serializeClientConfiguration,
   withClientServers,
   type ClientConfigurationDocument,
@@ -35,6 +37,7 @@ import { DISCOVERED_REGISTRATION_SETTINGS } from "./SetupRegistrationEnvironment
 import { registrationEnvironmentProposal } from "./UserConfigurationLocation.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { dshDocument, DshCordisDocument } from "./DshCordisPatch.js";
+import { ggcodeConfigurationHasUnnamedServers } from "./GgcodeConfigurationYaml.js";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
@@ -204,10 +207,15 @@ const configureClientDocument = async (
   }
   const original = snapshot?.text;
   let parsed: ClientConfigurationDocument;
+  let seeded: ClientConfigurationDocument;
+  let fallbackServers: Readonly<Record<string, unknown>> = {};
   try {
     parsed = parseClientConfiguration(
       original ??
-        (format === "toml" || format === "grok" || format === "dsh"
+        (format === "toml" ||
+        format === "grok" ||
+        format === "dsh" ||
+        format === "ggcode"
           ? ""
           : "{}"),
       format,
@@ -226,14 +234,50 @@ const configureClientDocument = async (
         reason: "registration_ownership",
         detail: ownershipBlocker,
       };
+    const fallback = await readZcodeFallbackServers(client, platform, parsed);
+    if (!fallback.ok) {
+      if (fallback.error.kind !== "registration_ownership")
+        throwCleanupFailure(fallback.error);
+      return fallback.error.kind === "registration_ownership"
+        ? {
+            status: "failed",
+            reason: "registration_ownership",
+            detail: fallback.error.detail,
+          }
+        : { status: "failed", reason: "readback" };
+    }
+    const superseded = await readSupersededServers(
+      client,
+      original !== undefined,
+    );
+    if (!superseded.ok) {
+      if (superseded.error.kind !== "registration_ownership")
+        throwCleanupFailure(superseded.error);
+      return superseded.error.kind === "registration_ownership"
+        ? {
+            status: "failed",
+            reason: "registration_ownership",
+            detail: superseded.error.detail,
+          }
+        : { status: "failed", reason: "readback" };
+    }
+    // The seeded candidate carries the legacy sources into the effective
+    // view the desired entry validates against, so a legacy setting paired
+    // with a proposed override passes admission instead of blocking the
+    // migration of an otherwise valid registration.
+    seeded = {
+      ...parsed,
+      servers: { ...superseded.value, ...fallback.value, ...parsed.servers },
+    };
+    fallbackServers = { ...superseded.value, ...fallback.value };
     const policy = await readClientPolicyBlock(
       client,
-      parsed,
+      seeded,
       await clientConfigurationDesired(
         client,
         environment,
         command,
-        parsed,
+        seeded,
         files.value,
         platform,
         launcherEnvironment,
@@ -252,26 +296,11 @@ const configureClientDocument = async (
     void cause;
     return { status: "failed", reason: "readback" };
   }
-  const fallback = await readZcodeFallbackServers(client, platform, parsed);
-  if (!fallback.ok) {
-    if (fallback.error.kind !== "registration_ownership")
-      throwCleanupFailure(fallback.error);
-    return fallback.error.kind === "registration_ownership"
-      ? {
-          status: "failed",
-          reason: "registration_ownership",
-          detail: fallback.error.detail,
-        }
-      : { status: "failed", reason: "readback" };
-  }
   const desired = await clientConfigurationDesired(
     client,
     environment,
     command,
-    {
-      ...parsed,
-      servers: { ...fallback.value, ...parsed.servers },
-    },
+    seeded,
     files.value,
     platform,
     launcherEnvironment,
@@ -300,7 +329,7 @@ const configureClientDocument = async (
     original,
     parsed,
     desired,
-    fallbackServers: fallback.value,
+    fallbackServers,
     platform,
   });
 };
@@ -962,6 +991,12 @@ const inspectClientDocument = async (
           throwCleanupFailure(fallback.error);
         return { status: "invalid", remediation: fallback.error.detail };
       }
+      const superseded = await readSupersededServers(client, false);
+      if (!superseded.ok) {
+        if (superseded.error.kind !== "registration_ownership")
+          throwCleanupFailure(superseded.error);
+        return { status: "invalid", remediation: superseded.error.detail };
+      }
       return { status: "create" };
     }
     return {
@@ -1056,6 +1091,72 @@ const isMissing = (cause: unknown): boolean =>
 
 const throwCleanupFailure = (error: ClientConfigurationFileError): void => {
   if (error.cleanupFailure !== undefined) throw error.cleanupFailure;
+};
+
+/**
+ * Servers a freshly created write target supersedes, for example ggcode's
+ * in-main `mcp_servers` section once mcp_servers.yaml exists. Seeding the new
+ * file with them mirrors the client's own migration; an existing target is
+ * left alone so a superseded entry cannot resurrect behind the user's back.
+ */
+const readSupersededServers = async (
+  client: SetupClient,
+  targetExists: boolean,
+): Promise<
+  Result<
+    Readonly<Record<string, unknown>>,
+    | ClientConfigurationFileError
+    | {
+        readonly kind: "registration_ownership";
+        readonly path: string;
+        readonly detail: string;
+      }
+  >
+> => {
+  const path = client.supersededConfigPath;
+  if (path === undefined || targetExists) return ok({});
+  if (client.format === "ggcode") {
+    // ggcode.yaml is the mapping-root main config, not the standalone layout,
+    // and its unnamed entries cannot survive migration into the keyed
+    // standalone table, so refuse instead of silently dropping them.
+    const text = await readConfigurationText(path);
+    if (!text.ok) return text;
+    if (text.value === undefined) return ok({});
+    try {
+      if (ggcodeConfigurationHasUnnamedServers(text.value))
+        return err({
+          kind: "malformed",
+          path,
+          detail: `Configuration ${path} holds MCP server entries without a \`name\`; ggcode loads them, but setup cannot migrate unnamed entries into mcp_servers.yaml without dropping them. Name or remove those entries, then rerun setup.`,
+        });
+      const legacy = parseGgcodeLegacyConfiguration(text.value);
+      // The legacy row this migration would carry into the fresh file must be
+      // REA's own, or seeding would silently replace another tool's launcher.
+      const ownershipBlocker = registrationOwnershipBlocker(
+        { ...client, configPath: path },
+        legacy,
+        text.value,
+        [{ ...legacy, sourcePath: path }],
+        HOST_PLATFORM.platform,
+      );
+      if (ownershipBlocker !== undefined)
+        return err({
+          kind: "registration_ownership",
+          path,
+          detail: ownershipBlocker,
+        });
+      return ok(legacy.servers);
+    } catch (cause: unknown) {
+      return err({
+        kind: "malformed",
+        path,
+        detail: `Configuration ${path} is malformed: ${errorMessage(cause)}`,
+      });
+    }
+  }
+  const document = await readConfigurationFile(path, client.format);
+  if (!document.ok) return document;
+  return ok(document.value?.servers ?? {});
 };
 
 /** Setup cannot write around a read-only inline layer that overrides REA. */
