@@ -97,6 +97,11 @@ import {
   il2cppMetadataViewRequestSchema,
 } from "./il2cppMetadataView.js";
 import {
+  unityAddressablesViewContextSchema,
+  unityAddressablesViewItemsSchema,
+  unityAddressablesViewRequestSchema,
+} from "./unityAddressablesView.js";
+import {
   interfaceBuilderViewContextSchema,
   interfaceBuilderViewItemsSchema,
   interfaceBuilderViewRequestSchema,
@@ -282,6 +287,7 @@ import {
   sourceToBundlePageViewResultSchema,
   sourceToBundleSummaryViewResultSchema,
 } from "./summarySchemas/sourceToBundleSummarySchemas.js";
+import { unityAddressablesSummaryViewResultSchema } from "./summarySchemas/unityAddressablesSummarySchema.js";
 import { wasmArtifactSummaryViewResultSchema } from "./summarySchemas/wasmArtifactSummarySchema.js";
 import {
   webBundlePageViewResultSchema,
@@ -359,6 +365,7 @@ export {
   rustBinarySummaryViewResultSchema,
   sourceToBundlePageViewResultSchema,
   sourceToBundleSummaryViewResultSchema,
+  unityAddressablesSummaryViewResultSchema,
   wasmArtifactSummaryViewResultSchema,
   webBundlePageViewResultSchema,
   webBundleSummaryViewResultSchema,
@@ -405,6 +412,7 @@ const viewResultBase = {
     "inspect_pcap_capture",
     "inspect_dart_aot",
     "inspect_il2cpp_metadata",
+    "inspect_unity_addressables",
     "inspect_model_artifact",
     "inspect_gpu_code_objects",
     ...NATIVE_INVENTORY_OPERATIONS,
@@ -740,6 +748,7 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     dartAotSummaryViewResultSchema,
     il2cppMetadataSummaryViewResultSchema,
     apkSignatureSummaryViewResultSchema,
+    unityAddressablesSummaryViewResultSchema,
     modelArtifactSummaryViewResultSchema,
     gpuCodeObjectsSummaryViewResultSchema,
     nativeInventorySummaryViewResultSchema,
@@ -953,6 +962,14 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     ...viewResultBase,
     ...il2cppMetadataViewContextSchema.shape,
     parent_operation: z.literal("inspect_il2cpp_metadata"),
+  }),
+  z.strictObject({
+    kind: z.literal("unity-addressables"),
+    view: unityAddressablesViewRequestSchema,
+    items: unityAddressablesViewItemsSchema,
+    ...viewResultBase,
+    ...unityAddressablesViewContextSchema.shape,
+    parent_operation: z.literal("inspect_unity_addressables"),
   }),
   z.strictObject({
     kind: z.literal("inventory"),
