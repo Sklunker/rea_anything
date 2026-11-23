@@ -197,8 +197,9 @@ function bulletCredits(parts, repository) {
   let localProse = "";
   for (const { text, href } of parts) {
     prose += text;
-    if (href) links.push(href);
-    const reference = githubReleaseReference(href);
+    const target = href?.split(/[?#]/u, 1)[0]?.replace(/\/$/u, "");
+    const reference = githubReleaseReference(target);
+    if (href) links.push(reference?.number !== undefined ? target : href);
     if (reference?.number !== undefined) {
       if (reference.repository === repository.toLowerCase())
         references.add(reference.number);
