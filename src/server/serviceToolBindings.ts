@@ -122,6 +122,7 @@ import {
   projectHarmonyApplicationEvidence,
 } from "../application/InventoryProjectionEvidence.js";
 import { inspectApiContractEvidence } from "../application/apiContract/ApiContractService.js";
+import { inspectCargoManifestEvidence } from "../application/cargoManifest/CargoManifestService.js";
 import type { EvidenceWorkflowExecution } from "../application/investigation/EvidenceWorkflowExecution.js";
 import type { InvestigationWorkflowExecution } from "../application/investigation/InvestigationWorkflows.js";
 import { traceApplicationFeatureEvidence } from "../application/javascript/JavaScriptApplicationWorkflowService.js";
@@ -1144,6 +1145,21 @@ const SERVICE_TOOL_BINDINGS = {
           inspectionExecution(
             await inspectNtfsJournalEvidence(input, resources, signal),
           ),
+      },
+      inspect_cargo_manifest: {
+        admission: "sdk",
+        workflow: async (input, { signal }) => {
+          const inspected = await inspectCargoManifestEvidence(
+            input,
+            resources,
+            {
+              signal,
+            },
+          );
+          return inspectionExecution(
+            inspected.ok ? ok(inspected.value.evidence) : inspected,
+          );
+        },
       },
       inspect_playwright_trace: {
         admission: "sdk",
