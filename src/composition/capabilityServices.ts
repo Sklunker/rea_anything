@@ -33,6 +33,7 @@ import { createSqliteDatabaseService } from "./sqlite.js";
 import { createDesktopApplicationService } from "./desktop.js";
 import { DesktopBuildComputers } from "../application/desktop/DesktopBuildComputers.js";
 import { readHostFile } from "../desktop/HostFileRead.js";
+import { createScreenJudge } from "../desktop/ScreenJudgeProcess.js";
 import { createGoBinaryService } from "./go.js";
 import { createRustBinaryService } from "./rust.js";
 import { createBeamService } from "./erlang.js";
@@ -367,6 +368,7 @@ const modules = {
       new DesktopBuildComputers(
         providerEnvironment,
         readHostFile,
+        createScreenJudge,
         options.desktopBuildSettle,
         options.desktopBuildDefaults,
         options.desktopBuildStartTiming,
