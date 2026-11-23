@@ -290,6 +290,7 @@ export const ENTRY_FILES = Object.freeze(
       ],
       firmware: [
         "FirmwareCommand.ts",
+        "FirmwareDoctor.ts",
         "FirmwareProvider.ts",
         "FirmwareProviderIdentities.ts",
         "devicetree/DevicetreeProvider.ts",
