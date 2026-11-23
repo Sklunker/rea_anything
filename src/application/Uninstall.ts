@@ -28,6 +28,7 @@ import {
   legacyClientServerPath,
   shadowedClientServers,
   withClientServers,
+  clientConfigurationValuesEqual,
   type ClientConfigurationDocument,
 } from "./ClientConfigurationDocument.js";
 import { err, ok, type Result } from "../domain/result.js";
@@ -40,7 +41,6 @@ import { analysisErrorWithCleanupDependencies } from "../domain/analysisErrorCle
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { copyFile, lstat, realpath, rm, rmdir } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { isDeepStrictEqual } from "node:util";
 import { homeDirectoryFromEnvironment } from "../config/homeDirectory.js";
 import { dirname } from "node:path";
 import { withinLexicalDirectory } from "../filesystem/cacheDirectory.js";
@@ -59,9 +59,11 @@ import {
 import { PRODUCT_IDENTITY } from "../identity.js";
 import { readSkillFile, skillDestinationSelection } from "./SetupSkill.js";
 import { dshDocument } from "./DshCordisPatch.js";
+import { mimoCodeClaudeCodeImport } from "./MimoCodeClaudeImport.js";
 import {
   isAbsentClientConfigPath,
   resolveClientConfigTransactionPath,
+  sameClientConfigurationFile,
 } from "./ClientConfigPath.js";
 import {
   preserveCurrentRecoveryBackup,
@@ -81,6 +83,7 @@ import {
 import {
   appDataRedirection,
   clientOwnershipEvidencePaths,
+  clientEvidencePaths,
   clientSharedRegistrationPaths,
   manualRegistrationRemediation,
   registrationWriteBlocker,
@@ -614,6 +617,99 @@ export const systemUninstallHost = (
   // Set with the client list: the package view that redirects this
   // process's AppData writes, if any.
   let redirection: MsixPackageView | undefined;
+  // Set with the client list: the Claude Code row whose removal MiMo Code's
+  // import of the same file follows.
+  let claudeCode: SetupClient | undefined;
+  let mimoMayImport = false;
+  // Compare the complete native configuration before and after removal, including
+  // the import-only case where every native file is missing or has no rea row.
+  const inspectLayeredRemoval = async (
+    client: UninstallClient,
+    read: ClientConfigurationRead,
+    ownershipEstablished: boolean,
+  ): Promise<UninstallItem | undefined> => {
+    const originalLayers: ClientConfigurationSource[] = [];
+    const remainingLayers: ClientConfigurationSource[] = [];
+    for (const configPath of client.configPaths ?? [client.configPath]) {
+      const layer =
+        configPath === client.configPath
+          ? read
+          : await readClientConfiguration(
+              { ...client, configPath },
+              fileSystem,
+              resources,
+              ownershipEstablished,
+            );
+      if (layer.kind === "item") {
+        if (layer.item.status !== "skipped") return layer.item;
+        continue;
+      }
+      const layerRemoval = clientRegistrationRemoval(
+        layer.parsed,
+        layer.original,
+        client,
+      );
+      if (!layerRemoval.ok)
+        return item(client.name, "failed", layerRemoval.error.detail);
+      originalLayers.push({ ...layer.parsed, sourcePath: configPath });
+      const servers = { ...layer.parsed.servers };
+      const legacyServers = { ...layer.parsed.legacyServers };
+      const name = PRODUCT_IDENTITY.mcpServerKey;
+      if (layerRemoval.value.removeNative) delete servers[name];
+      if (layerRemoval.value.legacyPath !== undefined)
+        delete legacyServers[name];
+      remainingLayers.push({
+        ...layer.parsed,
+        servers,
+        legacyServers,
+        sourcePath: configPath,
+      });
+    }
+    // REA never edits the inline layer, so it survives removal.
+    const inline = client.inlineConfiguration;
+    if (inline !== undefined) {
+      const layer = { ...inline.parsed, inlineOrigin: inline.origin };
+      originalLayers.push(layer);
+      remainingLayers.push(layer);
+    }
+    const selected = effectiveClientConfiguration(
+      originalLayers,
+      undefined,
+      platform,
+    )?.servers[PRODUCT_IDENTITY.mcpServerKey];
+    const remaining = effectiveClientConfiguration(
+      remainingLayers,
+      undefined,
+      platform,
+    )?.servers[PRODUCT_IDENTITY.mcpServerKey];
+    const altersEffectiveRegistration =
+      clientRegistrationOwnership(selected, client) === "owned"
+        ? remaining !== undefined
+        : !clientConfigurationValuesEqual(selected, remaining);
+    if (altersEffectiveRegistration)
+      return item(
+        client.name,
+        "failed",
+        client.format === "opencode"
+          ? "Removing REA's registration would activate or change an unowned OpenCode registration in another configuration layer, including a possible V1 fallback; no change was made. Remove or replace that registration manually, then rerun uninstall."
+          : `Removing REA's registration would activate or change a registration that another ${client.format === "kilo" ? "Kilo" : "MiMo Code"} configuration layer${inline === undefined ? "" : ` or ${inline.origin}, which REA does not edit,`} keeps in effect; no change was made. Remove or replace that registration manually, then rerun uninstall.`,
+      );
+    if (
+      remaining === undefined &&
+      client.claudeCodeImportPath !== undefined &&
+      (selected !== undefined || mimoMayImport)
+    ) {
+      const exposed = await claudeCodeImportExposure(
+        client,
+        client.claudeCodeImportPath,
+        claudeCode,
+        fileSystem,
+        selected !== undefined,
+      );
+      if (exposed !== undefined) return exposed;
+    }
+    return undefined;
+  };
   const clientWriteBlocker = (client: SetupClient): string | undefined =>
     registrationWriteBlocker(client, "uninstall") ??
     redirectedWriteBlocker(redirection, [client.configPath], "uninstall");
@@ -628,6 +724,7 @@ export const systemUninstallHost = (
         systemPaths,
       );
       redirection = appDataRedirection(supported);
+      claudeCode = supported.find(({ name }) => name === "claude_code");
       if (projectDirectory !== undefined) {
         const directory =
           await requireProjectUninstallDirectory(projectDirectory);
@@ -645,11 +742,17 @@ export const systemUninstallHost = (
       // rows in a readable configuration can still be removed independently;
       // an unresolved probe is unknown, never absence.
       const probes = new Map<string, DiscoveryProbe>();
-      for (const client of supported)
-        probes.set(
-          client.name,
-          await discoveryApplicability(client.discoveryPaths, fileSystem),
+      for (const client of supported) {
+        const probe = await discoveryApplicability(
+          client.format === "mimo_code"
+            ? clientEvidencePaths(client)
+            : client.discoveryPaths,
+          fileSystem,
         );
+        probes.set(client.name, probe);
+        if (client.format === "mimo_code")
+          mimoMayImport = probe.applicable || probe.unresolved;
+      }
       const paths = sharedConfigPaths(supported);
       const clients: UninstallClient[] = [];
       for (const client of supported)
@@ -720,6 +823,17 @@ export const systemUninstallHost = (
           resources,
           ownershipEstablished,
         );
+        if (
+          client.format === "mimo_code" &&
+          client.configPath === (client.configPaths?.[0] ?? client.configPath)
+        ) {
+          const blocked = await inspectLayeredRemoval(
+            client,
+            read,
+            ownershipEstablished,
+          );
+          if (blocked !== undefined) return blocked;
+        }
         if (read.kind === "item") {
           if (read.item.status === "failed") return read.item;
           return read.item.status === "skipped"
@@ -785,78 +899,16 @@ export const systemUninstallHost = (
               );
           }
         }
-        // OpenCode and Kilo merge every layer, so removing REA's entries can
-        // expose or change an entry another layer keeps.
         if (
           (client.format === "opencode" || client.format === "kilo") &&
           (removal.value.removeNative || removal.value.legacyPath !== undefined)
         ) {
-          const originalLayers: ClientConfigurationSource[] = [];
-          const remainingLayers: ClientConfigurationSource[] = [];
-          for (const configPath of client.configPaths ?? [client.configPath]) {
-            const layer =
-              configPath === client.configPath
-                ? read
-                : await readClientConfiguration(
-                    { ...client, configPath },
-                    fileSystem,
-                    resources,
-                    ownershipEstablished,
-                  );
-            if (layer.kind === "item") {
-              if (layer.item.status !== "skipped") return layer.item;
-              continue;
-            }
-            const layerRemoval = clientRegistrationRemoval(
-              layer.parsed,
-              layer.original,
-              client,
-            );
-            if (!layerRemoval.ok)
-              return item(client.name, "failed", layerRemoval.error.detail);
-            originalLayers.push({ ...layer.parsed, sourcePath: configPath });
-            const servers = { ...layer.parsed.servers };
-            const legacyServers = { ...layer.parsed.legacyServers };
-            const name = PRODUCT_IDENTITY.mcpServerKey;
-            if (layerRemoval.value.removeNative) delete servers[name];
-            if (layerRemoval.value.legacyPath !== undefined)
-              delete legacyServers[name];
-            remainingLayers.push({
-              ...layer.parsed,
-              servers,
-              legacyServers,
-              sourcePath: configPath,
-            });
-          }
-          // REA never edits the inline layer, so it survives removal.
-          const inline = client.inlineConfiguration;
-          if (inline !== undefined) {
-            const layer = { ...inline.parsed, inlineOrigin: inline.origin };
-            originalLayers.push(layer);
-            remainingLayers.push(layer);
-          }
-          const selected = effectiveClientConfiguration(
-            originalLayers,
-            undefined,
-            platform,
-          )?.servers[PRODUCT_IDENTITY.mcpServerKey];
-          const remaining = effectiveClientConfiguration(
-            remainingLayers,
-            undefined,
-            platform,
-          )?.servers[PRODUCT_IDENTITY.mcpServerKey];
-          const altersEffectiveRegistration =
-            clientRegistrationOwnership(selected, client) === "owned"
-              ? remaining !== undefined
-              : !isDeepStrictEqual(selected, remaining);
-          if (altersEffectiveRegistration)
-            return item(
-              client.name,
-              "failed",
-              client.format === "opencode"
-                ? "Removing REA's registration would activate or change an unowned OpenCode registration in another configuration layer, including a possible V1 fallback; no change was made. Remove or replace that registration manually, then rerun uninstall."
-                : `Removing REA's registration would activate or change a registration that another Kilo configuration layer${inline === undefined ? "" : ` or ${inline.origin}, which REA does not edit,`} keeps in effect; no change was made. Remove or replace that registration manually, then rerun uninstall.`,
-            );
+          const blocked = await inspectLayeredRemoval(
+            client,
+            read,
+            ownershipEstablished,
+          );
+          if (blocked !== undefined) return blocked;
         }
         // REA writes only the user layer. If the read-only lower layers alone
         // still define an entry that is not disabled, removal would leave it
@@ -995,6 +1047,64 @@ const enabledRegistration = (entry: unknown): boolean =>
     "enabled" in entry &&
     entry.enabled === false
   );
+
+/**
+ * MiMo Code imports Claude Code's enabled `rea` entry once none of its own
+ * layers declares one. Removing REA's MiMo Code entries must not hand it an
+ * entry this uninstall keeps; an entry Claude Code's own removal takes is
+ * gone for both.
+ */
+const claudeCodeImportExposure = async (
+  client: SetupClient,
+  path: string,
+  claudeCode: SetupClient | undefined,
+  fileSystem: UninstallFileSystem,
+  removesNative: boolean,
+): Promise<UninstallItem | undefined> => {
+  let text: string;
+  try {
+    text = await fileSystem.readText(path);
+  } catch (cause: unknown) {
+    return isMissing(cause)
+      ? undefined
+      : item(
+          client.name,
+          "failed",
+          `Claude Code's ${path}, which MiMo Code would read after uninstall, could not be read; no change was made. Check its permissions, then rerun uninstall.`,
+        );
+  }
+  const entry = mimoCodeClaudeCodeImport(text);
+  if (
+    !enabledRegistration(entry) ||
+    (!removesNative && clientRegistrationOwnership(entry, client) !== "owned")
+  )
+    return undefined;
+  if (
+    claudeCode !== undefined &&
+    claudeCode.configPathError === undefined &&
+    (await sameClientConfigurationFile(
+      claudeCode.configPath,
+      path,
+      fileSystem.realpath,
+    ))
+  ) {
+    try {
+      const removal = clientRegistrationRemoval(
+        parseClientConfiguration(text, "claude_code"),
+        text,
+        claudeCode,
+      );
+      if (removal.ok && removal.value.removeNative) return undefined;
+    } catch {
+      // Claude Code's own inspection reports a file it cannot parse.
+    }
+  }
+  return item(
+    client.name,
+    "failed",
+    `MiMo Code would use the enabled rea entry in Claude Code's ${path} after uninstall. Remove or rename that entry, or set MIMOCODE_DISABLE_CLAUDE_CODE_MCP=1 for MiMo Code and REA, then rerun uninstall.`,
+  );
+};
 
 /** Whether removal would change this configuration. */
 const registrationPresent = (parsed: ClientConfigurationDocument): boolean => {
